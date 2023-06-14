@@ -136,19 +136,7 @@ extern int sc_height;
 #endif
 
 #if MSDOS_COMPILER==WIN32C
-#define UTF8_MAX_LENGTH 4
-struct keyRecord
-{
-	WCHAR unicode;
-	int ascii;
-	int scan;
-} currentKey;
-
-static int keyCount = 0;
 static WORD curr_attr;
-static int pending_scancode = 0;
-static char x11mousebuf[] = "[M???";    /* Mouse report, after ESC */
-static int x11mousePos, x11mouseCount;
 
 static HANDLE con_out_save = INVALID_HANDLE_VALUE; /* previous console */
 static HANDLE con_out_ours = INVALID_HANDLE_VALUE; /* our own */
@@ -2791,6 +2779,43 @@ public void putbs(void)
 }
 
 #if MSDOS_COMPILER==WIN32C
+
+/*
+ * low level KB queue for use by the public KB functions and friends.
+ * the API has no over/underflow protection. test kbq_free/len if unsure.
+ */
+#define kbq_mask(e)   ((unsigned char)(e))
+
+static struct {
+	unsigned char buf[kbq_mask(-1) + 1];  /* size 256, but up to 255 vals */
+	unsigned char head, tail;
+} kbq;  /* = {0} */
+
+#define kbq_len()       kbq_mask(kbq.head - kbq.tail)
+#define kbq_free()      kbq_mask(~kbq_len())
+
+#define kbq_putc(c)     (kbq.buf[kbq.head++] = (c))
+#define kbq_putscan(c)  (kbq_putc(0), kbq_putc(c))
+#define kbq_getc()      ((int)kbq.buf[kbq.tail++])
+#define kbq_peekn(n)    ((int)kbq.buf[kbq_mask(kbq.tail + (n))])
+#define kbq_ungetc(c)   (kbq.buf[--kbq.tail] = (c))
+
+static void kbq_putbuf(const char *buf, unsigned n)
+{
+	while (n--)
+		kbq_putc(*buf++);
+}
+
+/* if n >= 2: repeat the initial content, if any, n-1 more times */
+static void kbq_repeat(unsigned n)
+{
+	unsigned len = kbq_len(), i;
+
+	n = n ? (n - 1) * len : 0;
+	for (i = 0; i < n; ++i)
+		kbq_putc(kbq_peekn(i % len));
+}
+
 /*
  * Determine whether an input character is waiting to be read.
  */
@@ -2798,20 +2823,10 @@ public int win32_kbhit(void)
 {
 	INPUT_RECORD ip;
 	DWORD read;
+	DWORD scancode;
 
-	if (keyCount > 0)
+	if (kbq_len())
 		return (TRUE);
-
-	currentKey.ascii = 0;
-	currentKey.scan = 0;
-
-	if (x11mouseCount > 0)
-	{
-		currentKey.ascii = x11mousebuf[x11mousePos++];
-		--x11mouseCount;
-		keyCount = 1;
-		return (TRUE);
-	}
 
 	/*
 	 * Wait for a real key-down event, but
@@ -2823,32 +2838,31 @@ public int win32_kbhit(void)
 		if (read == 0)
 			return (FALSE);
 		ReadConsoleInputW(tty, &ip, 1, &read);
+
 		/* generate an X11 mouse sequence from the mouse event */
 		if (mousecap && ip.EventType == MOUSE_EVENT &&
 		    ip.Event.MouseEvent.dwEventFlags != MOUSE_MOVED)
 		{
-			x11mousebuf[3] = X11MOUSE_OFFSET + ip.Event.MouseEvent.dwMousePosition.X + 1;
-			x11mousebuf[4] = X11MOUSE_OFFSET + ip.Event.MouseEvent.dwMousePosition.Y + 1;
+			char x11mousebuf[] = "\033[M???";    /* Mouse report */
+			x11mousebuf[4] = X11MOUSE_OFFSET + ip.Event.MouseEvent.dwMousePosition.X + 1;
+			x11mousebuf[5] = X11MOUSE_OFFSET + ip.Event.MouseEvent.dwMousePosition.Y + 1;
 			switch (ip.Event.MouseEvent.dwEventFlags)
 			{
 			case 0: /* press or release */
 				if (ip.Event.MouseEvent.dwButtonState == 0)
-					x11mousebuf[2] = X11MOUSE_OFFSET + X11MOUSE_BUTTON_REL;
+					x11mousebuf[3] = X11MOUSE_OFFSET + X11MOUSE_BUTTON_REL;
 				else if (ip.Event.MouseEvent.dwButtonState & (FROM_LEFT_3RD_BUTTON_PRESSED | FROM_LEFT_4TH_BUTTON_PRESSED))
 					continue;
 				else
-					x11mousebuf[2] = X11MOUSE_OFFSET + X11MOUSE_BUTTON1 + ((int)ip.Event.MouseEvent.dwButtonState << 1);
+					x11mousebuf[3] = X11MOUSE_OFFSET + X11MOUSE_BUTTON1 + ((int)ip.Event.MouseEvent.dwButtonState << 1);
 				break;
 			case MOUSE_WHEELED:
-				x11mousebuf[2] = X11MOUSE_OFFSET + (((int)ip.Event.MouseEvent.dwButtonState < 0) ? X11MOUSE_WHEEL_DOWN : X11MOUSE_WHEEL_UP);
+				x11mousebuf[3] = X11MOUSE_OFFSET + (((int)ip.Event.MouseEvent.dwButtonState < 0) ? X11MOUSE_WHEEL_DOWN : X11MOUSE_WHEEL_UP);
 				break;
 			default:
 				continue;
 			}
-			x11mousePos = 0;
-			x11mouseCount = 5;
-			currentKey.ascii = ESC;
-			keyCount = 1;
+			kbq_putbuf(x11mousebuf, 6);
 			return (TRUE);
 		}
 	} while (ip.EventType != KEY_EVENT ||
@@ -2859,102 +2873,76 @@ public int win32_kbhit(void)
 		ip.Event.KeyEvent.wVirtualKeyCode == VK_SHIFT ||
 		ip.Event.KeyEvent.wVirtualKeyCode == VK_CONTROL ||
 		ip.Event.KeyEvent.wVirtualKeyCode == VK_MENU);
-		
-	currentKey.unicode = ip.Event.KeyEvent.uChar.UnicodeChar;
-	currentKey.ascii = ip.Event.KeyEvent.uChar.AsciiChar;
-	currentKey.scan = ip.Event.KeyEvent.wVirtualScanCode;
-	keyCount = ip.Event.KeyEvent.wRepeatCount;
+
+	scancode = ip.Event.KeyEvent.wVirtualScanCode;
 
 	if (ip.Event.KeyEvent.dwControlKeyState & 
 		(LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED))
 	{
-		switch (currentKey.scan)
-		{
-		case PCK_ALT_E:     /* letter 'E' */
-			currentKey.ascii = 0;
-			break;
-		}
+		if (scancode == PCK_ALT_E)  /* letter 'E' */
+			kbq_putscan(PCK_ALT_E);
+
 	} else if (ip.Event.KeyEvent.dwControlKeyState & 
 		(LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED))
 	{
-		switch (currentKey.scan)
-		{
-		case PCK_RIGHT: /* right arrow */
-			currentKey.scan = PCK_CTL_RIGHT;
-			break;
-		case PCK_LEFT: /* left arrow */
-			currentKey.scan = PCK_CTL_LEFT;
-			break;
-		case PCK_DELETE: /* delete */
-			currentKey.scan = PCK_CTL_DELETE;
-			break;
-		}
+		if (scancode == PCK_RIGHT) /* right arrow */
+			scancode = PCK_CTL_RIGHT;
+		else if (scancode == PCK_LEFT) /* left arrow */
+			scancode = PCK_CTL_LEFT;
+		else if (scancode == PCK_DELETE) /* delete */
+			scancode = PCK_CTL_DELETE;
+
 	} else if (ip.Event.KeyEvent.dwControlKeyState & SHIFT_PRESSED)
 	{
-		switch (currentKey.scan)
+		if (scancode == PCK_SHIFT_TAB)  /* tab */
+			kbq_putscan(PCK_SHIFT_TAB);
+	}
+
+	if (kbq_len() == 0)  /* nothing pushed yet */
+	{
+		/* the loop condition ensures we have unicode and/or scancode */
+		if (ip.Event.KeyEvent.uChar.UnicodeChar)
 		{
-		case PCK_SHIFT_TAB: /* tab */
-			currentKey.ascii = 0;
-			break;
+			/* TODO: handle surrogate pairs */
+			char utf8buf[4];
+			int n = WideCharToMultiByte(
+				CP_UTF8, 0, &ip.Event.KeyEvent.uChar.UnicodeChar,
+				1, utf8buf, sizeof(utf8buf), NULL, NULL);
+
+			if (n <= 0)
+				return (FALSE);  /* can't convert */
+			kbq_putbuf(utf8buf, n);
+		} else
+		{
+			/* ignore these because $reasons. see commits 6643e8d4 and ad0e395c */
+			if (scancode == PCK_CAPS_LOCK || scancode == PCK_NUM_LOCK)
+				return (FALSE);
+			kbq_putscan(scancode);
 		}
 	}
+
+	/* enqueue at most one repeat to avoid pathological growth */
+	if (ip.Event.KeyEvent.wRepeatCount >= 2 && kbq_free() >= kbq_len())
+		kbq_repeat(2);
 
 	return (TRUE);
 }
 
 /*
  * Read a character from the keyboard.
+ * ASCII/Unicode keys are delivered as UTF-8 bytes in consecutive calls,
+ * extended PC keys return 0 in one call, and a scan-code at the next call.
  */
-public char WIN32getch(void)
+public int WIN32getch(void)
 {
-	char ascii;
-	static unsigned char utf8[UTF8_MAX_LENGTH];
-	static int utf8_size = 0;
-	static int utf8_next_byte = 0;
-
-	// Return the rest of multibyte character from the prior call
-	if (utf8_next_byte < utf8_size)
+	while (win32_kbhit() == FALSE)
 	{
-		ascii = utf8[utf8_next_byte++];
-		return ascii;
-	}
-	utf8_size = 0;
-
-	if (pending_scancode)
-	{
-		pending_scancode = 0;
-		return ((char)(currentKey.scan & 0x00FF));
+		Sleep(20);
+		if (ABORT_SIGS())
+			return ('\003');
 	}
 
-	do {
-		while (win32_kbhit() == FALSE)
-		{
-			Sleep(20);
-			if (ABORT_SIGS())
-				return ('\003');
-			continue;
-		}
-		keyCount --;
-		// If multibyte character, return its first byte
-		if (currentKey.ascii != currentKey.unicode)
-		{
-			utf8_size = WideCharToMultiByte(CP_UTF8, 0, &currentKey.unicode, 1, &utf8, sizeof(utf8), NULL, NULL);
-			if (utf8_size == 0 )
-				return '\0';
-			ascii = utf8[0];
-			utf8_next_byte = 1;
-		} else
-			ascii = currentKey.ascii;
-		/*
-		 * On PC's, the extended keys return a 2 byte sequence beginning 
-		 * with '00', so if the ascii code is 00, the next byte will be 
-		 * the lsb of the scan code.
-		 */
-		pending_scancode = (ascii == 0x00);
-	} while (pending_scancode &&
-		(currentKey.scan == PCK_CAPS_LOCK || currentKey.scan == PCK_NUM_LOCK));
-
-	return ascii;
+	return kbq_getc();
 }
 #endif
 
