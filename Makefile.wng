@@ -102,6 +102,10 @@ CFLAGS += ${XCFLAGS}
 LDFLAGS += ${XLDFLAGS}
 LIBS += ${XLDLIBS}
 
+ifneq (,$(wildcard ver_extra.cstr))
+     CFLAGS  += -DHAVE_VER_EXTRA=1
+endif
+
 #### End of system configuration section. ####
 
 # This rule allows us to supply the necessary -D options

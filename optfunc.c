@@ -551,6 +551,11 @@ public void opt__V(int type, constant char *s)
 		set_output(1, TRUE); /* Force output to stdout per GNU standard for --version output. */
 		putstr("less ");
 		putstr(version);
+		#ifdef HAVE_VER_EXTRA
+			putstr(" "  /* expecting C-string without pre/post spacing */
+				#include "ver_extra.cstr"
+			);
+		#endif
 		putstr(" (");
 		putstr(pattern_lib_name());
 		putstr(" regular expressions)\n");
