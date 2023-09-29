@@ -98,6 +98,9 @@ endif
 
 LIBS += -lshell32
 
+CFLAGS += ${XCFLAGS}
+LDFLAGS += ${XLDFLAGS}
+
 ifneq (,$(wildcard ver_extra.cstr))
      CFLAGS  += -DHAVE_VER_EXTRA=1
 endif
