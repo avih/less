@@ -360,7 +360,15 @@ int main(int argc, constant char *argv[])
 	}
 	editproto = lgetenv("LESSEDIT");
 	if (isnullenv(editproto))
+	{
+		/* TODO: make EEDITPROTO a platform #define? */
+	#if MSDOS_COMPILER==WIN32C
+		/* the default on windows - notepad, doesn't have +LINE */
+		editproto = "%E %g";
+	#else
 		editproto = "%E ?lm+%lm. %g";
+	#endif
+	}
 #endif
 
 	/*
