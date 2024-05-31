@@ -607,6 +607,8 @@ enum PARSE_STATE {
 	PS_NORMAL = 0,
 	PS_ESC,        // right after ESC
 	PS_CSI,        // after ESC[ and before the end of sequence
+	PS_OSC,        // after ESC] and before ST or BEL
+	PS_OSC_ESC,    // right after ESC in PS_OSC
 };
 
 /* we maintain a parsing state, and the sgr state of our virtual terminal.
@@ -650,8 +652,13 @@ static void win_flush(void)
 		}
 
 		case PS_ESC:
-			/* if not CSI ('['), assume it's ESC-<one-char-thing> */
-			parse_state = *p == '[' ? PS_CSI : PS_NORMAL;
+			parse_state = *p == '[' ? PS_CSI
+			            : *p == ']' ? PS_OSC
+			            : PS_NORMAL; /* assume ESC-<one-char-thing> */
+
+			/* OSC is passthrough on VT terminal, else eaten */
+			if (*p == ']' && vt_enabled)
+				WIN32textout("\033]", 2);
 			continue;
 
 		case PS_CSI:
@@ -678,6 +685,33 @@ static void win_flush(void)
 			sgr_len = 0;
 			parse_state = PS_NORMAL;
 			continue;
+
+		case PS_OSC_ESC:
+			if (*p == '\\') {
+				if (vt_enabled)
+					WIN32textout(p, 1);
+				parse_state = PS_NORMAL;
+				continue;
+			}
+
+			parse_state = PS_OSC;
+			/* fallthrough: not ST, re-process *p as PS_OSC */
+
+		case PS_OSC: {
+			/* ends at ST ("\e\\") or BEL ('\a') */
+			/* try to write in one go - avoid breaking UTF8 */
+			char *p0 = p;
+			while (p != oend && *p != '\a' && *p != ESC)
+				++p;
+			if (vt_enabled)  /* write also the '\a' or ESC */
+				WIN32textout(p0, p - p0 + (p != oend));
+
+			if (p == oend)
+				return;
+			parse_state = *p == '\a' ? PS_NORMAL : PS_OSC_ESC;
+			continue;
+		}
+
 		}  /* switch */
 	}
 }
