@@ -497,6 +497,51 @@ static void update_sgr(sgr_state *sgr, const unsigned char* vals, int len)
 	}
 }
 
+typedef unsigned char u8;
+
+// static long long xdist_sq(u8 r,u8 g,u8 b, u8 R,u8 G,u8 B) {
+// 	int rx = (r+R+1) / 2;
+// 	return (long long)(512 + rx) * (r-R) * (r-R) / 256
+// 	     + (long long)4 * (g-G) * (g-G)
+// 	     + (long long)(512 + 255 - rx) * (b-B) * (b-B) / 256;
+// }
+
+#define dist_sq(r,g,b, R,G,B) ((r-R)*(r-R) + (g-G)*(g-G) + (b-B)*(b-B))
+
+static int rgb2wincolor(u8 r, u8 g, u8 b)
+{
+	static const int c1 = 128, c2 = 255, w = 192, bb = 128;
+	// static const int c1 = 64, c2 = 255, w = 0, bb = 0;
+	// static const int c1 = 144, c2 = 255, w = 0, bb = 0;
+	// static const int c1 = 72, c2 = 144, w = 128, bb = 96;
+	// static const int c1 = 72, c2 = 220, w = 172, bb = 128;
+	static const struct {u8 r, g, b;} xp[16] = {
+		// black, red, green, yellow, blue, magenta, cyan, white
+		// {0,0,0}, {128,0,0}, {0,128,0}, {128,128,0},
+		// {0,0,128}, {128,0,128}, {0,128,128}, {192,192,192},
+		// {128,128,128}, {255,0,0}, {0,255,0}, {255,255,0},
+		// {0,0,255}, {255,0,255}, {0,255,255}, {255,255,255},
+
+		{0,0,0}, {c1,0,0}, {0,c1,0}, {c1,c1,0},
+		{0,0,c1}, {c1,0,c1}, {0,c1,c1}, {w,w,w},
+		{bb,bb,bb}, {c2,0,0}, {0,c2,0}, {c2,c2,0},
+		{0,0,c2}, {c2,0,c2}, {0,c2,c2}, {c2,c2,c2},
+	};
+	long long d_min = LONG_LONG_MAX;  // bigger than max possible distance
+	int i_min, i;
+	// #define dist_sq(r,g,b, R,G,B) (2*(r-R)*(r-R) + 4*(g-G)*(g-G) + 2*(b-B)*(b-B))
+	for (i = 0; i < 16; ++i) {
+		int d = dist_sq(r,g,b, xp[i].r, xp[i].g, xp[i].b);
+		if (i==0 || i == 7 || i == 8 || i == 15)
+			continue;//d *= 8;
+		if (d < d_min) {
+			d_min = d;
+			i_min = i;
+		}
+	}
+	return i_min;
+}
+
 int static get_win_color(long color, int def)
 {
 #if MSDOS_COMPILER==WIN32C
@@ -540,7 +585,11 @@ int static get_win_color(long color, int def)
 		else  /* non linear, indexed 6x6x6 color cube */
 			r = x256[tmp / 36], g = x256[tmp / 6 % 6], b = x256[tmp % 6];
 	}
-
+	// {
+	// 	int c = rgb2wincolor(r, g, b);
+	// 	return screen_color[c & 7] | (c & 8);
+	// }
+#if 1
 	/*
 	 * convert RGB to 3 bit color + 1 bit brightness.
 	 * each channel is considered in one of 3 states: off/low/high.
@@ -552,13 +601,33 @@ int static get_win_color(long color, int def)
 	high = (r > 196) + (g > 196) + (b > 196);
 	tmp = (r + g + b) / 3;
 
+	// int xs = r*r + b*b + g*g;
+	// long gray_dist = ((long)3*tmp*tmp - (r*r + b*b + g*g));
+	long gray_dist = dist_sq(tmp,tmp,tmp, r,g,b);
+
 	/* bright threshold is 60 (not 64) to balance the 256 color grayscale */
-	if (any == 0 || (any == 3 && high != 2))  /* do grayscale */
+	// if (any == 0 || (any == 3 && (high == 0 || high == 3)))  /* do grayscale */
+	// if (any == 0 || (any == 3 && high != 2))  /* do grayscale */
+	// if (gray_dist < 20*20)
+	#define sq(x) ((x)*(x))
+	if (gray_dist < sq(40))
+	// if (dist_sq(r, g, b, tmp,tmp,tmp) < 1000)
+		// return 2;
+		// return 0;
 		return screen_color[tmp & 0x80 ? 7 : 0]
 			| ((tmp & ~0x80) >= 60 ? 8 : 0);
+	// return 0;
+	{
+		int c = rgb2wincolor(r, g, b);
+		return screen_color[c & 7] | (c & 8);
+	}
 
 	return high ? screen_color[(r > 196) | 2 * (g > 196) | 4 * (b > 196)] | 8
 	            : screen_color[(r > 112) | 2 * (g > 112) | 4 * (b > 112)];
+
+	int c = rgb2wincolor(r, g, b);
+	return screen_color[c & 7] | (c & 8);
+#endif
 }
 
 static void set_win_colors(sgr_state *sgr)
