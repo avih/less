@@ -94,7 +94,7 @@ static int outfd = 2; /* stderr */
 #if MSDOS_COMPILER==WIN32C || MSDOS_COMPILER==BORLANDC || MSDOS_COMPILER==DJGPPC
 
 
-#if 0  /* original colors parser */
+#if 1  /* original colors parser */
 
 typedef unsigned t_attr;
 
