@@ -1,0 +1,403 @@
+# mingw makefile to build "less" v322 or later. Based on Makefile.wng at v661.
+# That's three-ish decades of evolution, since win95, with one makefile.
+#
+# v537+ build with unmodified sources. pre-v537 use auto-applied backports.
+#
+# Note that some revisions don't build due to temporary build breakage.
+#
+# Requires gnu make, mingw cc, few posix utils (grep, sed, awk, sh, etc).
+# On windows, busybox-w32 and mingw compiler are enough (e.g. w64devkit).
+# For pre-v537, git is also required (with valid user configured).
+#
+# To use:
+# - Copy this file outside the source tree, e.g. to ../mingw.mak
+# - git checkout <early-revision, e.g. v550>
+# - make -f ../mingw.mak  [CC=<mingw-cc> SHELL=sh  (when cross-compling)]
+# - XCFLAGS=... and/or XLDFLAGS=... are appended if provided.
+# - with clang, add: XCFLAGS="-std=c89 -Wno-deprecated-non-prototype"
+#
+# With revisions before v537, one or more backport git commits are added.
+# If that's inconvenient while bisecting, use "make ... BPCOMMIT=NO" to keep
+# the backports applied as unstaged modified files (technically: reset after
+# the commits). Requires "git reset --hard" before changing revision again,
+# and sometimes also "git clean -f" to remove untracked files.
+#
+# Incremental/parallel [re-]builds work as expected regardless of BPCOMMIT=NO.
+#
+# This makefile adapts to several changes at the source files over the years,
+# such as new files (evar.c, xbuf.c, lesskey_parse.c, less.hlp[.VER]), and
+# changes to how funcs.h is generated (around v618, v490).
+#
+# it also uses embedded posix mkhelp/mkfuncs fallbacks, if perl is missing.
+#
+# 64 bit build before v553 succeeds, but crash with filenames - "less file",
+# due to 32 bit HANDLE instead of 64. But redirection works - "less < file",
+# and 32-bit builds don't have this issue.
+#
+# mingw support was added in v537. Before that, a minimal subset of v537 is
+# added as git commit "tmp-backport-v537". That may or may not be the full
+# possible functionality, as the main effort was building rather than testing.
+#
+# For [v333..v511) a subset of f0f0eda is committed as "tmp-backport-v511".
+# Patches error("...") -> error("...",0) at screen.c. The issue existed since
+# that line was added (d23b8390, v333), as error(...) at output.c always took
+# 2 args since it was added at the initial commit v243, but it became visible
+# at v490 which switched to ANSI-C prototypes - with mismatched num of args.
+#
+# Earlier revisions require few more small fixups, and it builds down to v322.
+# v322 (1996) is the first version which supports msvc (only borland prior),
+# probably targeting win95 or so, and it builds+works with this makefile too.
+#
+# Earlier than v322 might be possible by backporting 592f651, some other day.
+#
+# this builds the official releases v436..v661, and some more earlier ones.
+#
+#   for v in \
+#       v661 v643 v633 v632 v608 v590 v581.2 v581 v563 v551 v550 v537 \
+#       v512 v500 v490 v487 v481 v458 v451 v444 v443 v436 v420 v405 \
+#       v394 v380 v367 v353 v340 v335 v334 v332 v329 v328 v327 v326 v322
+#   do
+#       git clean -xf &&
+#       git checkout $v &&
+#       make -f ../mingw.mak -j8 &&
+#       cp less.exe ../less.mingw.$v.exe &&
+#       >&2 printf "\33[32;1mOK $v\33[m\n" || break
+#   done >/dev/null
+#
+# ------- modified Makefile.wng starts below -------
+
+
+# Makefile for less using mingw-w64 package:
+#   http://mingw-w64.org/doku.php
+#
+# Derived from Makefile.wnm
+#
+# Usage: mingw32-make -f Makefile.wng [REGEX_PACKAGE={posix|gnu|regcomp-local}]
+#
+# When cross compiling, add also: SHELL=sh CC=<mingw-cc>
+#
+# The optional command line parameter "REGEX_PACKAGE" is used to specify 
+# a regular expression package for compilation and linking.  This parameter
+# can assume one of three values.  
+#
+# REGEX_PACKAGE == regcomp-local
+#   This choice selects the regular expression package written by Henry
+#   Spencer.  It is implemented by the repository file "regexp.c".  
+#
+# REGEX_PACKAGE == posix
+#   This choice selects the POSIX implementation and is provided by MingW.  
+#   This is the default choice.  
+#
+# REGEX_PACKAGE == gnu
+#   This choice selects the GNU implementation and is provided by MingW.  
+#
+# REGEX_PACKAGE == none
+#   This choice disables regex, and instead uses smart plain text search.
+#
+# By default, the files help.c and funcs.h are generated using few posix
+# utilities (grep, sed, etc). On Windows, if the tools are missing, add:
+#   WINGEN=1
+# to compile a native C program which will be used instead of the posix tools.
+# NOTE: to cross compile with WINGEN=1, e.g. to arm, first run with native CC:
+#   make -f Makefile.wng CC=gcc buildgen.exe
+# and then compile `less` with the arm CC:
+#   make -f Makefile.wng WINGEN=1 CC=armv7...
+
+#### Start of system configuration section. ####
+
+CC = gcc
+
+# Definitions specific to mingw
+#
+MINGW_DEFINES     = -DMINGW -DWIN32
+
+# This specifies the "root" directory of the MingW installation.  
+# It is defined so that the compiler and linker can find the header files
+# and library that provide regular expression support.  
+#
+MINGW_ROOT_PATH = /mingw-w64/mingw64
+
+# Determine the regular expression package to be used.  
+#
+REGEX_PACKAGE ?= regcomp-local
+ifeq (${REGEX_PACKAGE},regcomp-local)
+    MINGW_DEFINES += -DUSE_REGEXP_C
+else ifeq (${REGEX_PACKAGE},posix)
+    MINGW_DEFINES += -DUSE_POSIX_REGCOMP
+else ifeq (${REGEX_PACKAGE},gnu)
+    MINGW_DEFINES += -DUSE_GNU_REGEX
+else ifeq (${REGEX_PACKAGE},none)
+#    without specific regex package, defines.wn sets NO_REGEX=1
+else
+    $(error REGEX_PACKAGE must be posix, gnu, regcomp-local or none)
+endif
+
+MINGW_REGEX_IPATH = -I${MINGW_ROOT_PATH}/opt/include
+MINGW_REGEX_LPATH = -L${MINGW_ROOT_PATH}/opt/lib
+MINGW_REGEX_LIB   = -lregex
+
+CFLAGS_MINGW = ${MINGW_DEFINES}
+ifneq  (${REGEX_PACKAGE},regcomp-local)
+CFLAGS_MINGW += ${MINGW_REGEX_IPATH}
+endif
+
+# MingW may use sh.exe instead of cmd.exe.
+# Default to cmd.exe, but allow sh.exe too, e.g. for cross compile.
+#
+SHELL = cmd.exe
+ifeq  (${SHELL},cmd.exe)
+    CP = copy >NUL
+    MV = move
+    RM = del
+    DIFF = comp /M >NUL  # using exit status - not output
+    DEVNULL = NUL
+else
+    CP = cp
+    MV = mv
+    RM = rm
+    DIFF = diff
+    DEVNULL = /dev/null
+endif
+
+CFLAGS  = -O2 ${CFLAGS_MINGW}
+ifneq  (${REGEX_PACKAGE},none)
+ifneq  (${REGEX_PACKAGE},regcomp-local)
+LDFLAGS = ${MINGW_REGEX_LPATH}
+LIBS    = ${MINGW_REGEX_LIB}
+endif
+endif
+
+LIBS += -lshell32
+
+CFLAGS += ${XCFLAGS}
+LDFLAGS += ${XLDFLAGS}
+
+#### End of system configuration section. ####
+
+# adapt to new or renamed files over the years
+ifneq (,$(wildcard evar.c))
+    EVARC = evar.c
+    EVARO = evar.o
+endif
+ifneq (,$(wildcard xbuf.c))
+    XBUFC = xbuf.c
+    XBUFO = xbuf.o
+endif
+ifneq (,$(wildcard lesskey_parse.c))
+    LESSKEY_PARSEO = lesskey_parse.o
+endif
+ifneq (,$(wildcard cvt.c))
+    CVTC = cvt.c
+    CVTO = cvt.o
+endif
+ifneq (,$(wildcard pattern.c))
+    PATTERNC = pattern.c
+    PATTERNO = pattern.o
+endif
+ifneq (,$(wildcard less.hlp))  # v554
+    HELPSRC = less.hlp
+else
+    HELPSRC = less.hlp.VER
+endif
+ifneq (,$(wildcard lessecho.c))  # doesn't exist before v323
+    LESSECHOEXE = lessecho.exe
+endif
+
+
+# This rule allows us to supply the necessary -D options
+# in addition to whatever the user asks for.
+.c.o:
+	${CC} -c -I. ${CFLAGS} $<
+
+LESS_SRC = brac.c ch.c charset.c cmdbuf.c command.c		\
+           ${CVTC} decode.c edit.c ${EVARC} filename.c forwback.c 		\
+           ifile.c input.c jump.c line.c linenum.c 		\
+           lsystem.c main.c mark.c optfunc.c option.c 		\
+	   opttbl.c os.c output.c ${PATTERNC} position.c 		\
+	   prompt.c          screen.c           search.c 	\
+	   signal.c tags.c ttyin.c version.c ${XBUFC}
+ifeq  (${REGEX_PACKAGE},regcomp-local)
+LESS_SRC += regexp.c
+endif
+
+OBJ = \
+	main.o screen.o brac.o ch.o charset.o cmdbuf.o \
+	command.o ${CVTO} decode.o edit.o ${EVARO} filename.o forwback.o \
+	help.o ifile.o input.o jump.o ${LESSKEY_PARSEO} line.o linenum.o \
+	lsystem.o mark.o optfunc.o option.o opttbl.o os.o \
+	output.o ${PATTERNO} position.o prompt.o search.o signal.o \
+	tags.o ttyin.o version.o ${XBUFO}
+ifeq  (${REGEX_PACKAGE},regcomp-local)
+OBJ += regexp.o
+endif
+
+all: less.exe lesskey.exe ${LESSECHOEXE}
+
+less.exe: ${OBJ}
+	${CC} ${LDFLAGS} -o $@ ${OBJ} ${LIBS}
+
+lesskey.exe: lesskey.o ${LESSKEY_PARSEO} version.o ${XBUFO}
+	${CC} ${LDFLAGS} -o $@ lesskey.o ${LESSKEY_PARSEO} version.o ${XBUFO}
+
+lessecho.exe: lessecho.o version.o
+	${CC} ${LDFLAGS} -o $@ lessecho.o version.o
+
+defines.h: defines.wn
+	${CP} $< $@
+
+ifeq  (${WINGEN},1)
+    BUILDGEN = buildgen.exe
+    MKHELP = buildgen.exe help
+    MKFUNCS = type 2>NUL ${LESS_SRC} | buildgen.exe funcs
+else
+    MKSELF = ${MAKEFILE_LIST}  # this file in gnu make (no need for lastword)
+    $(shell grep "^\#mkhelp " < ${MKSELF} | sed "s/^\#mkhelp //" > mkhelp.tmp)
+
+    MKHELP = (perl mkhelp.pl || sh mkhelp.sh || sh mkhelp.tmp)
+    MKFUNCS = grep -h "^public [^;]*$$" ${LESS_SRC} | sed "s/$$/;/"  # v618+
+
+    # adapt to procedure changes over the years (funcs.h), and maybe backports
+    OLD_MKFUNCS = $(shell grep -q "^public.*(.*)\s*$$" ${LESS_SRC} || echo YES)
+    ifeq (YES,${OLD_MKFUNCS})  # pre 76a7805e (~ v618)
+        $(shell grep "^\#mkfuncs " < ${MKSELF} | sed "s/^\#mkfuncs //" > mkfuncs.tmp)
+        MKFUNCS = cat ${LESS_SRC} | (perl mkfuncs.pl || sh mkfuncs.tmp)  # v490+
+
+        ifeq (,$(wildcard Makefile.wng))  # missing mingw makefile - pre v537
+            ifeq (,$(shell git log --oneline | grep "^ceda5a"))  # pre ~ v490
+                export NOARGS =  # for mkfuncs.tmp, but mkfuncs.awk is faster
+                MKFUNCS = cat ${LESS_SRC} | (awk -f mkfuncs.awk || sh mkfuncs.tmp)
+            endif
+
+            CFLAGS += -DHAVE_SYS_STAT_H=1  # pre 328
+            CFLAGS += -DSTDC_HEADERS=1  # pre v353
+
+            # defines.wn is the last backported file, so if it's same as v537
+            # then it's enough indication that the backports are applied. this
+            # "if" makes rebuild faster, and avoids touching files (->rebuild)
+            ifneq (,$(shell git diff v537 defines.wn))
+                # all the patches here except v537 are conditional [implicitly]
+                # even those not inside if[n]eq (git apply fail -> no-op)
+                GITCOMMIT = git commit -uno -m tmp-backport
+                GITAPPLY = git apply -q --ignore-whitespace  # ignore CR @EOL
+
+                # mingw uses the msvc codepaths, else borland has diff API
+                $(shell grep "^\#msvcfile " < ${MKSELF} | sed "s/^\#msvcfile //" | ${GITAPPLY})
+                $(info $(shell git add filename.c && ${GITCOMMIT}-v327))
+
+                # less.hlp.VER not part of the repo before v339
+                ifeq (,$(wildcard less.hlp.VER))
+                    $(shell git cherry-pick -n 3d51d71b >${DEVNULL})
+                    $(info $(shell ${GITCOMMIT}-v339))
+                endif
+
+                # fixup multiple def less_is_more
+                ifneq (,$(shell grep "^public\s*int\s*less_is_more" main.c))
+                    $(shell git cherry-pick -n 42f5e871 >${DEVNULL})
+                    $(info $(shell ${GITCOMMIT}-v438))
+                endif
+
+                # error("...") -> error("...", NULL)
+                $(shell grep "^\#errdiff " < ${MKSELF} | sed "s/^\#errdiff //" | ${GITAPPLY})
+                $(info $(shell git add screen.c && ${GITCOMMIT}-v511))
+
+                # mingw support. copying 3 files from v537 (not patching)
+                $(shell git checkout v537 lglob.h lsystem.c defines.wn)
+                $(shell ${CP} lglob.h glob.h && git add glob.h)  # ~ v327
+                $(info $(shell ${GITCOMMIT}-v537))
+
+                ifeq (${BPCOMMIT},NO)
+                    ORIG = git log --oneline | grep -v tmp-backport | head -n 1 | sed "s/\s.*//"
+                    $(shell git reset $(shell ${ORIG}))
+                endif
+            endif  # backports applied
+        endif  # pre v537
+    endif  # OLD_MKFUNCS - pre ~ v618
+endif
+
+funcs.h: ${LESS_SRC} ${BUILDGEN}
+	-${CP} funcs.h funcs.h.old
+	${MKFUNCS} >funcs.h.tmp
+	${DIFF} funcs.h.tmp funcs.h || ${MV} funcs.h.tmp funcs.h
+
+help.c: ${HELPSRC} ${BUILDGEN}
+	${MKHELP}  < ${HELPSRC} > $@
+
+buildgen.exe: buildgen.c
+	${CC} $< -o $@
+
+${OBJ} lessecho.o lesskey.o: less.h defines.h funcs.h
+
+TAGS:
+	etags *.c *.h
+
+clean:
+	-${RM} *.o *.exe defines.h funcs.h help.c TAGS
+
+
+# embedded posix sh scripts mkhelp.tmp and mkfuncs.tmp. fallbacks for perl
+
+#mkhelp echo "/* Generated by $0 from less.hlp[.VER] at $(LC_ALL=C date -u) */"
+#mkhelp echo '#include "less.h"'
+#mkhelp echo 'constant char helpdata[] = {'
+#mkhelp 
+#mkhelp     tr -d \\r |      # no CR's at the file except maybe at EOL
+#mkhelp     od -b -v -A n |  # octal values, typically 16 per line
+#mkhelp     awk '{ for(i=1; i<=NF; i++) printf("0%s,", $i); print "" }'
+#mkhelp 
+#mkhelp echo '0 };'
+#mkhelp echo 'constant int size_helpdata = sizeof(helpdata) - 1;'
+
+#mkfuncs # 1-2s in busybox-w32 sh (vs nearly instant with perl).
+#mkfuncs >&2 printf %s "$0 ... "
+#mkfuncs TAB=$(printf \\t) state=0 params=
+#mkfuncs while IFS= read -r line; do
+#mkfuncs    case $state in
+#mkfuncs    0)  case $line in "${TAB}public"*) state=1 buf=${line#?}; esac;;
+#mkfuncs    1)  case $line in *"("*) state=2 buf="$buf ${line%%(*}"; esac;;
+#mkfuncs    2)  case $line in
+#mkfuncs        *";")   line=${line#"$TAB"}
+#mkfuncs                params=$params${params:+, }${line%?}
+#mkfuncs                ;;
+#mkfuncs      # mkfuncs.pl uses the macro wrappers, but the names changed,
+#mkfuncs      # and no-macros is more portable (NOARGS is the same-ish thing)
+#mkfuncs      # "{"*)   echo "$buf LESSPARAMS ((${params:-VOID_PARAM}));"
+#mkfuncs        "{"*)   echo "$buf (${NOARGS-${params:-void}});"
+#mkfuncs                state=0 params=
+#mkfuncs        esac
+#mkfuncs    esac
+#mkfuncs done
+#mkfuncs >&2 echo "done"
+
+
+# minimal subset of f0f0eda (v511)
+
+#errdiff diff --git a/screen.c b/screen.c
+#errdiff index c329c7a..5bc5bd5 100644
+#errdiff --- a/screen.c
+#errdiff +++ b/screen.c
+#errdiff @@ -128,7 +128,7 @@ static void win32_deinit_term();
+#errdiff  #define	MAKEATTR(fg,bg)		((WORD)((fg)|((bg)<<4)))
+#errdiff  #define	SETCOLORS(fg,bg)	{ curr_attr = MAKEATTR(fg,bg); \
+#errdiff  				if (SetConsoleTextAttribute(con_out, curr_attr) == 0) \
+#errdiff -				error("SETCOLORS failed"); }
+#errdiff +				error("SETCOLORS failed",NULL); }
+#errdiff  #endif
+#errdiff  
+#errdiff  #if MSDOS_COMPILER
+
+
+# required for v326
+
+#msvcfile diff --git a/filename.c b/filename.c
+#msvcfile index d0488f6..3aa73df 100644
+#msvcfile --- a/filename.c
+#msvcfile +++ b/filename.c
+#msvcfile @@ -703,7 +703,7 @@ close_altfile(altfilename, filename, pipefd)
+#msvcfile  					char ext[_MAX_EXT];	\
+#msvcfile  					int handle;
+#msvcfile  #else
+#msvcfile -#ifdef _MSC_VER
+#msvcfile +#if defined(_MSC_VER) || defined(MINGW)
+#msvcfile  
+#msvcfile  #define	FIND_FIRST(filename,fndp)	_findfirst(filename, fndp)
+#msvcfile  #define	FIND_NEXT(handle,fndp)		_findnext(handle, fndp)
