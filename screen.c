@@ -1773,6 +1773,15 @@ static void win32_init_vt_term(void)
 	{
 		auto_wrap = 1;
 		defer_wrap = 1;
+
+		/* Windows terminal, unlike the Windows console, has a bug
+		 * where it spills scrolled-out content of non-primary buffers
+		 * into the main scrollback buffer, but not in alt-screen:
+		 *   https://github.com/microsoft/terminal/issues/17874
+		 * Note: we don't need a new buffer if we use alt-screen,
+		 * but it's simpler to work "on top" of the non-vt init.
+		 */
+		// WriteConsole(con_out, "\033[?1049h", 8, 0, 0);  // ALTSCR ON
 	}
 }
 
@@ -3442,26 +3451,116 @@ public void WIN32setcolors(int fg, int bg)
 	SETCOLORS(fg, bg);
 }
 
+#if MSDOS_COMPILER==WIN32C
+// Write u8buf as if the console output CP is UTF8 - regardless of the CP.
+// hcon should be a console handle.
+// Return: 0 on successful write[s], else -1 (e.g. if hcon is not a console).
+//
+// Up to 3 bytes of an incomplete codepoint may be buffered from prior call[s].
+// All the completed codepoints in one call are written using WriteConsoleW.
+// Bad sequence of any length (till ASCII7 or UTF8 lead) prints one U+FFFD.
+//
+// note: one console is assumed, and the (3 bytes) buffer is shared regardless
+//       of possibly different hcon. This can result in invalid codepoints
+//       output if streams are multiplexed mid-codepoint (same as elsewhere?)
+static int writeCon_utf8(HANDLE hcon, const char *u8buf, size_t u8siz)
+{
+	static int state = 0;  // -1: bad, 0-3: remaining cp bytes (0: done/new)
+	static DWORD codepoint = 0;  // accumulated from up to 4 UTF8 bytes
+
+	static wchar_t wbuf[4096];  // non-state. static avoids +8K on stack
+	int wlen = 0;
+
+	// ASCII7 uses least logic, then UTF8 continuations, UTF8 lead, errors
+	while (u8siz--)
+	{
+		unsigned char c = *u8buf++;
+		int topbits = 0;
+
+		while (c & (0x80 >> topbits))
+			++topbits;
+
+		if (state == 0 && topbits == 0)
+		{
+			// valid ASCII7, state remains 0
+			codepoint = c;
+
+		} else if (state > 0 && topbits == 1)
+		{
+			// valid continuation byte
+			codepoint = (codepoint << 6) | (c & 0x3f);
+			if (--state)
+				continue;
+
+		} else if (state == 0 && topbits >= 2 && topbits <= 4)
+		{
+			// valid UTF8 lead of 2/3/4 bytes codepoint
+			codepoint = c & (0x7f >> topbits);
+			state = topbits - 1;  // remaining bytes after lead
+			continue;
+
+		} else
+		{
+			// already bad (state<0), or unexpected c at state 0-3.
+			// U+FFFD is added only at the 1st bad byte (state>=0).
+			// regardless, c may be valid to reprocess as state 0
+			// (even when it's the 1st unexpected in state 1/2/3)
+			int replacement_done = state < 0;
+
+			if (topbits < 5 && topbits != 1)
+			{
+				--u8buf;  // valid for state 0, reprocess
+				++u8siz;
+				state = 0;
+			} else
+			{
+				state = -1;  // set/keep bad state
+			}
+
+			if (replacement_done)
+				continue;
+
+			// 1st unexpected byte, add U+FFFD REPLACEMENT CHAR
+			codepoint = 0xfffd;
+		}
+
+		// codepoint is complete
+		// we don't reject surrogate halves, reserved, etc
+		if (codepoint < 0x10000)
+		{
+			wbuf[wlen++] = codepoint;
+		} else
+		{
+			// generate a surrogates pair (wbuf has room for 2+)
+			codepoint -= 0x10000;
+			wbuf[wlen++] = 0xd800 | (codepoint >> 10);
+			wbuf[wlen++] = 0xdc00 | (codepoint & 0x3ff);
+		}
+
+		// flush if we have less than two empty spaces
+		if (wlen > countof(wbuf) - 2)
+		{
+			if (!WriteConsoleW(hcon, wbuf, wlen, 0, 0))
+				return -1;
+			wlen = 0;
+		}
+	}
+
+	if (wlen && !WriteConsoleW(hcon, wbuf, wlen, 0, 0))
+		return -1;
+	return 0;
+}
+#endif /* MSDOS_COMPILER==WIN32C */
+
 /*
  */
 public void WIN32textout(constant char *text, size_t len)
 {
 #if MSDOS_COMPILER==WIN32C
-	DWORD written;
-	if (utf_mode == 2)
-	{
-		/*
-		 * We've got UTF-8 text in a non-UTF-8 console.  Convert it to
-		 * wide and use WriteConsoleW.
-		 * Biggest input len is OUTBUF_SIZE of obuf from win_flush,
-		 * which is also the biggest output count if it's ASCII.
-		 * "static" wtext is not a state - only avoid 16K on stack.
-		 */
-		static WCHAR wtext[OUTBUF_SIZE];
-		len = MultiByteToWideChar(CP_UTF8, 0, text, len, wtext, countof(wtext));
-		WriteConsoleW(con_out, wtext, len, &written, NULL);
-	} else
-		WriteConsole(con_out, text, (DWORD) len, &written, NULL);
+	if (utf_mode)
+		writeCon_utf8(con_out, text, len);
+	else
+		WriteConsole(con_out, text, len, NULL, NULL);
 #else
 	char buf[2048];
 	if (len >= sizeof(buf))
