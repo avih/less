@@ -329,13 +329,7 @@ static int icharset(constant char *name, int no_error)
 		{
 			ichardef(p->desc);
 			if (p->p_flag != NULL)
-			{
-#if MSDOS_COMPILER==WIN32C
-				*(p->p_flag) = 1 + (GetConsoleOutputCP() != CP_UTF8);
-#else
 				*(p->p_flag) = 1;
-#endif
-			}
 			return (1);
 		}
 	}
