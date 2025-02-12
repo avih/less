@@ -1788,7 +1788,10 @@ static void win32_init_vt_term(void)
 static void win32_deinit_vt_term(void)
 {
 	if (vt_enabled == 1 && con_out == con_out_save)
+	{
+		// WriteConsole(con_out, "\033[?1049l", 8, 0, 0);  // ALTSCR OFF
 		SetConsoleMode(con_out, init_console_output_mode);
+	}
 }
 
 /*
